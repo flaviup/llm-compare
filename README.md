@@ -10,7 +10,7 @@ A single self-contained HTML file. No build step, no server, no dependencies. Ru
 
 ## Quick start
 
-**Hosted (GitHub Pages):** open `https://flaviup.github.io/llm-compare/`. HTTPS is required for the "connect notes folder" feature to work.
+**Hosted (GitHub Pages):** open [`https://flaviup.github.io/llm-compare/`](https://flaviup.github.io/llm-compare/). HTTPS is required for the "connect notes folder" feature to work.
 
 **Local:** just open the file — double-click it (`file://`). In Chromium-based browsers (Chrome, Edge, Brave) this is a secure context, so every feature works, including "connect notes folder." No server required.
 
