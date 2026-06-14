@@ -4,13 +4,13 @@ One prompt, many models, side by side — then keep the good parts straight into
 
 A single self-contained HTML file. No build step, no server, no dependencies. Run the same prompt across Claude, GPT, Gemini, Grok, DeepSeek, Qwen, Llama, and local Ollama models at once, compare the answers in parallel columns, and save the ones you like to a markdown notes folder with tags and attribution.
 
-![fan-out — one prompt fanned out across Claude, GPT, and Gemini, with per-column keep and re-run controls](screenshot.svg)
+![fan-out — one prompt fanned out across Claude, GPT, and Gemini, with per-column keep and re-run controls](screenshot.png)
 
 > The image above is a representative mockup of the interface. Replace it with a real screenshot once you've run the tool, or delete the line if you'd rather not include one.
 
 ## Quick start
 
-**Hosted (GitHub Pages):** open `https://<username>.github.io/<repo>/`. HTTPS is required for the "connect notes folder" feature to work.
+**Hosted (GitHub Pages):** open `https://flaviup.github.io/llm-compare/`. HTTPS is required for the "connect notes folder" feature to work.
 
 **Local:** just open the file — double-click it (`file://`). In Chromium-based browsers (Chrome, Edge, Brave) this is a secure context, so every feature works, including "connect notes folder." No server required.
 
