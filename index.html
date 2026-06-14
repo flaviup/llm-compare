@@ -1,0 +1,1223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fan-out · multi-model compare & clip</title>
+<style>
+  /* ---- Design tokens ----
+     Subject: a developer's console for running one prompt across many models
+     and harvesting the lines worth keeping. Plumbing aesthetic — monospaced,
+     panel-based, the seams left visible because the owner is the mechanic.
+     Palette: deep slate ground, warm paper panels, one signal-amber accent
+     for "kept" actions (the harvest), cool cyan for model identity. */
+  :root {
+    --ground: #14171c;
+    --panel: #1c2027;
+    --panel-2: #21262e;
+    --line: #2d333d;
+    --line-bright: #3a424e;
+    --ink: #e6e9ed;
+    --ink-dim: #9aa3af;
+    --ink-faint: #646c78;
+    --amber: #e8a13a;
+    --amber-dim: #8a6526;
+    --cyan: #54b4c4;
+    --green: #5ca872;
+    --red: #cc6b5f;
+    --radius: 6px;
+    --mono: 'SF Mono', 'JetBrains Mono', 'Fira Code', ui-monospace, 'Cascadia Code', Menlo, Consolas, monospace;
+    --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.5;
+    display: flex;
+    flex-direction: column;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font-family: inherit; cursor: pointer; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+    outline: 2px solid var(--amber);
+    outline-offset: 1px;
+  }
+
+  /* ---- Top bar ---- */
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 10px 16px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    flex-shrink: 0;
+  }
+  .brand { display: flex; align-items: baseline; gap: 9px; }
+  .brand .mark { color: var(--amber); font-weight: 700; letter-spacing: -0.5px; }
+  .brand .mark::before { content: "▸ "; color: var(--amber-dim); }
+  .brand .sub { color: var(--ink-faint); font-size: 11px; }
+  header .spacer { flex: 1; }
+  .topbtn {
+    background: var(--panel-2); color: var(--ink-dim);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 6px 11px; font-size: 11px; transition: all .12s;
+  }
+  .topbtn:hover { color: var(--ink); border-color: var(--line-bright); }
+  .topbtn .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .dot.off { background: var(--ink-faint); }
+  .dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+
+  /* ---- Prompt dock ---- */
+  .dock {
+    padding: 14px 16px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    flex-shrink: 0;
+  }
+  .promptwrap { position: relative; }
+  textarea#prompt {
+    width: 100%; min-height: 78px; resize: vertical;
+    background: var(--ground); color: var(--ink);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 12px 13px; font-family: var(--mono); font-size: 13.5px; line-height: 1.55;
+  }
+  textarea#prompt::placeholder { color: var(--ink-faint); }
+  .dockrow { display: flex; align-items: center; gap: 12px; margin-top: 11px; }
+  .modeltoggles { display: flex; flex-wrap: wrap; gap: 7px; flex: 1; }
+  .mtoggle {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 20px; padding: 5px 12px 5px 9px; font-size: 11px;
+    color: var(--ink-dim); transition: all .12s; user-select: none;
+  }
+  .mtoggle:hover { border-color: var(--line-bright); }
+  .mtoggle.active { color: var(--ink); border-color: var(--cyan); background: color-mix(in srgb, var(--cyan) 12%, var(--panel-2)); }
+  .mtoggle .swatch { width: 8px; height: 8px; border-radius: 2px; background: var(--ink-faint); }
+  .mtoggle.active .swatch { background: var(--cyan); }
+  .runbtn {
+    background: var(--amber); color: #1a1205; font-weight: 700;
+    border: none; border-radius: var(--radius);
+    padding: 10px 22px; font-size: 13px; letter-spacing: 0.3px;
+    transition: filter .12s; white-space: nowrap;
+  }
+  .runbtn:hover { filter: brightness(1.08); }
+  .runbtn:disabled { opacity: 0.4; cursor: not-allowed; }
+  kbd {
+    font-family: var(--mono); font-size: 10px; background: rgba(0,0,0,.3);
+    border: 1px solid var(--line-bright); border-radius: 3px; padding: 1px 5px; color: var(--ink-dim);
+  }
+
+  /* ---- Columns ---- */
+  .board {
+    flex: 1; display: flex; gap: 1px; overflow-x: auto; overflow-y: hidden;
+    background: var(--line); min-height: 0;
+  }
+  .col {
+    flex: 1; min-width: 300px; display: flex; flex-direction: column;
+    background: var(--ground); min-height: 0;
+  }
+  .colhead {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 13px; background: var(--panel-2);
+    border-bottom: 1px solid var(--line); flex-shrink: 0;
+  }
+  .colhead .swatch { width: 9px; height: 9px; border-radius: 2px; background: var(--cyan); flex-shrink: 0; }
+  .colhead .name { font-weight: 600; font-size: 12px; }
+  .colhead .vendor { color: var(--ink-faint); font-size: 10px; }
+  .colhead .stat { margin-left: auto; font-size: 10px; color: var(--ink-faint); }
+  .colhead .stat.running { color: var(--amber); }
+  .colhead .stat.done { color: var(--green); }
+  .colhead .stat.err { color: var(--red); }
+  .colrerun { margin-left: 8px; background: var(--panel); border: 1px solid var(--line); color: var(--ink-dim); border-radius: 4px; padding: 2px 8px; font-size: 13px; line-height: 1; cursor: pointer; transition: all .12s; }
+  .colrerun:hover { color: var(--amber); border-color: var(--amber-dim); }
+  .colrerun:active { transform: rotate(180deg); }
+  .colkeep { margin-left: 6px; background: var(--panel); border: 1px solid var(--line); color: var(--ink-dim); border-radius: 4px; padding: 2px 8px; font-size: 13px; line-height: 1; cursor: pointer; transition: all .12s; }
+  .colkeep:hover { color: var(--amber); border-color: var(--amber-dim); }
+  .colrerun:disabled, .colkeep:disabled { opacity: .3; cursor: not-allowed; }
+  .colrerun:disabled:hover, .colkeep:disabled:hover { color: var(--ink-dim); border-color: var(--line); transform: none; }
+  .topbtn:disabled { opacity: .4; cursor: not-allowed; }
+  .topbtn:disabled:hover { color: var(--ink-dim); border-color: var(--line); }
+  .colbody {
+    flex: 1; overflow-y: auto; padding: 14px 13px;
+    font-size: 13px; line-height: 1.62; white-space: pre-wrap; word-wrap: break-word;
+    user-select: text;
+  }
+  .colbody.empty { color: var(--ink-faint); display: flex; align-items: center; justify-content: center; text-align: center; padding: 30px; }
+  .colbody .err { color: var(--red); }
+  .colbody .hint { color: var(--ink-faint); font-size: 11px; }
+  /* selection styling — the moment of harvest */
+  .colbody::selection, .colbody *::selection { background: var(--amber); color: #1a1205; }
+
+  /* ---- Harvest popover ---- */
+  #harvest {
+    position: fixed; z-index: 50; display: none;
+    background: var(--panel); border: 1px solid var(--amber-dim);
+    border-radius: var(--radius); box-shadow: 0 8px 28px rgba(0,0,0,.5);
+    padding: 4px;
+  }
+  #harvest button {
+    display: block; width: 100%; text-align: left;
+    background: none; border: none; color: var(--ink);
+    padding: 7px 12px; font-size: 12px; border-radius: 4px; white-space: nowrap;
+  }
+  #harvest button:hover { background: var(--amber); color: #1a1205; }
+  #harvest button .k { color: var(--ink-faint); margin-left: 14px; font-size: 10px; }
+  #harvest button:hover .k { color: #1a1205; }
+
+  /* ---- Modal (file destination) ---- */
+  .scrim {
+    position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 100;
+    display: none; align-items: center; justify-content: center; padding: 20px;
+  }
+  .scrim.show { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--line-bright);
+    border-radius: 8px; width: 100%; max-width: 540px; max-height: 88vh;
+    overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,.6);
+  }
+  .modal h2 { font-size: 14px; padding: 15px 18px; border-bottom: 1px solid var(--line); font-weight: 600; }
+  .modal h2 .x { float: right; color: var(--ink-faint); cursor: pointer; font-weight: 400; }
+  .modal h2 .x:hover { color: var(--ink); }
+  .mbody { padding: 18px; }
+  .mbody label { display: block; font-size: 11px; color: var(--ink-dim); margin: 14px 0 6px; }
+  .mbody label:first-child { margin-top: 0; }
+  .field, .selectf {
+    width: 100%; background: var(--ground); color: var(--ink);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 9px 11px; font-family: var(--mono); font-size: 12.5px;
+  }
+  .clip-preview {
+    background: var(--ground); border: 1px solid var(--line); border-left: 3px solid var(--amber);
+    border-radius: 4px; padding: 11px 13px; font-size: 12px; color: var(--ink-dim);
+    max-height: 130px; overflow-y: auto; white-space: pre-wrap; line-height: 1.55;
+  }
+  .seg { display: flex; gap: 0; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .seg button {
+    flex: 1; background: var(--ground); border: none; color: var(--ink-dim);
+    padding: 8px; font-size: 11.5px; border-right: 1px solid var(--line);
+  }
+  .seg button:last-child { border-right: none; }
+  .seg button.sel { background: var(--panel-2); color: var(--ink); box-shadow: inset 0 -2px 0 var(--amber); }
+  .mfoot { display: flex; gap: 9px; padding: 15px 18px; border-top: 1px solid var(--line); justify-content: flex-end; }
+  .mfoot .note { margin-right: auto; font-size: 10.5px; color: var(--ink-faint); align-self: center; max-width: 280px; }
+  .btn-amber { background: var(--amber); color: #1a1205; font-weight: 700; border: none; border-radius: var(--radius); padding: 9px 18px; font-size: 12px; }
+  .btn-amber:hover { filter: brightness(1.08); }
+  .btn-amber:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-ghost { background: var(--panel-2); color: var(--ink-dim); border: 1px solid var(--line); border-radius: var(--radius); padding: 9px 16px; font-size: 12px; }
+  .btn-ghost:hover { color: var(--ink); }
+  .tagchips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .tagchip { background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px; padding: 3px 10px; font-size: 11px; color: var(--cyan); }
+
+  /* ---- Settings modal extras ---- */
+  .keyrow { margin-bottom: 14px; }
+  .keyrow .lbl { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--ink-dim); margin-bottom: 6px; }
+  .keyrow .lbl .swatch { width: 8px; height: 8px; border-radius: 2px; }
+  .explain { font-size: 11px; color: var(--ink-faint); line-height: 1.6; background: var(--ground); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 16px; }
+  .explain code { color: var(--cyan); background: rgba(0,0,0,.3); padding: 1px 5px; border-radius: 3px; }
+  .explain strong { color: var(--ink-dim); }
+
+  /* ---- Toast ---- */
+  #toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(80px);
+    background: var(--panel); border: 1px solid var(--green); color: var(--ink);
+    padding: 11px 18px; border-radius: var(--radius); font-size: 12px; z-index: 200;
+    transition: transform .25s cubic-bezier(.2,.8,.3,1); box-shadow: 0 8px 24px rgba(0,0,0,.4);
+    max-width: 90vw;
+  }
+  #toast.show { transform: translateX(-50%) translateY(0); }
+  #toast.err { border-color: var(--red); }
+
+  .empty-board { flex:1; display:flex; align-items:center; justify-content:center; color: var(--ink-faint); font-size: 13px; text-align:center; padding: 40px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <span class="mark">fan-out</span>
+    <span class="sub">one prompt · many models · keep the good parts</span>
+  </div>
+  <span class="spacer"></span>
+  <button class="topbtn" id="keepAllBtn">⤓ keep all columns</button>
+  <button class="topbtn" id="streamBtn"><span class="dot off" id="streamDot"></span>streaming</button>
+  <button class="topbtn" id="vaultBtn"><span class="dot off" id="vaultDot"></span>connect notes folder</button>
+  <button class="topbtn" id="settingsBtn">⚙ keys &amp; models</button>
+</header>
+
+<div class="dock">
+  <div class="promptwrap">
+    <textarea id="prompt" placeholder="Type one prompt. It runs against every selected model below.  ⌘/Ctrl + Enter to run."></textarea>
+  </div>
+  <div class="dockrow">
+    <div class="modeltoggles" id="modelToggles"></div>
+    <button class="runbtn" id="runBtn">Run ▸</button>
+  </div>
+</div>
+
+<div class="board" id="board">
+  <div class="empty-board">Pick your models in <strong>&nbsp;keys &amp; models&nbsp;</strong>, write a prompt, and hit Run.<br>Responses land here side by side. Select any text to keep it.</div>
+</div>
+
+<!-- harvest popover -->
+<div id="harvest">
+  <button id="harvestKeep">▸ Keep selection<span class="k">to a note</span></button>
+  <button id="harvestCopy">⧉ Copy<span class="k">clipboard</span></button>
+</div>
+
+<!-- destination modal -->
+<div class="scrim" id="clipScrim">
+  <div class="modal">
+    <h2><span id="clipTitle">Keep this</span> <span class="x" data-close="clip">✕</span></h2>
+    <div class="mbody">
+      <label>Selected text</label>
+      <div class="clip-preview" id="clipPreview"></div>
+
+      <label>Where it came from</label>
+      <div class="clip-preview" id="clipSource" style="border-left-color: var(--cyan); max-height:none;"></div>
+
+      <label>Tags <span style="color:var(--ink-faint)">— space or comma separated</span></label>
+      <input class="field" id="clipTags" placeholder="trading idea georgia-tax actely">
+      <div class="tagchips" id="tagChips"></div>
+
+      <label>Destination</label>
+      <div class="seg" id="destSeg">
+        <button data-dest="existing" class="sel">Append to file</button>
+        <button data-dest="new">New file</button>
+        <button data-dest="clipboard">Clipboard</button>
+      </div>
+
+      <div id="destExisting">
+        <label>Pick a file in your notes folder</label>
+        <select class="selectf" id="existingSelect"><option>— connect a folder first —</option></select>
+      </div>
+      <div id="destNew" style="display:none">
+        <label>New file name</label>
+        <input class="field" id="newFileName" placeholder="trading-ideas.md">
+      </div>
+    </div>
+    <div class="mfoot">
+      <span class="note" id="destNote"></span>
+      <button class="btn-ghost" data-close="clip">Cancel</button>
+      <button class="btn-amber" id="clipConfirm">Keep ▸</button>
+    </div>
+  </div>
+</div>
+
+<!-- settings modal -->
+<div class="scrim" id="setScrim">
+  <div class="modal">
+    <h2>Keys &amp; models <span class="x" data-close="set">✕</span></h2>
+    <div class="mbody">
+      <div class="explain">
+        <strong>Simplest path:</strong> one <strong>OpenRouter</strong> key powers every row whose vendor is <code>openrouter</code> — Claude, GPT, Gemini, Grok and more, one balance, and it's callable straight from the browser (no CORS proxy needed). Keys live only in <strong>this browser</strong> (<code>localStorage</code>), never in the file. <br><br>Prefer going direct? Each provider below has its own key field; change a row's vendor to e.g. <code>anthropic</code> to use it. <strong>Ollama</strong> runs locally at <code>localhost:11434</code>. For direct cloud vendors a browser may hit a <strong>CORS</strong> wall — if one fails with a network error, paste a proxy URL below.
+      </div>
+      <div class="keyrow">
+        <div class="lbl"><span class="swatch" style="background:#6467f2"></span>OpenRouter API key <span style="color:var(--ink-faint)">— powers all <code style="color:var(--cyan)">openrouter</code> rows</span></div>
+        <input class="field" id="key_openrouter" type="password" placeholder="sk-or-...">
+      </div>
+
+      <div class="keyrow">
+        <div class="lbl"><span class="swatch" style="background:#d97757"></span>Anthropic (Claude) API key</div>
+        <input class="field" id="key_anthropic" type="password" placeholder="sk-ant-...">
+      </div>
+      <div class="keyrow">
+        <div class="lbl"><span class="swatch" style="background:#10a37f"></span>OpenAI API key</div>
+        <input class="field" id="key_openai" type="password" placeholder="sk-...">
+      </div>
+      <div class="keyrow">
+        <div class="lbl"><span class="swatch" style="background:#7c6cff"></span>DeepSeek API key</div>
+        <input class="field" id="key_deepseek" type="password" placeholder="sk-...">
+      </div>
+      <div class="keyrow">
+        <div class="lbl"><span class="swatch" style="background:#a855c4"></span>Qwen (DashScope) API key</div>
+        <input class="field" id="key_qwen" type="password" placeholder="sk-...">
+      </div>
+      <div class="keyrow">
+        <div class="lbl"><span class="swatch" style="background:#e8e8e8"></span>Grok (xAI) API key</div>
+        <input class="field" id="key_grok" type="password" placeholder="xai-...">
+      </div>
+      <div class="keyrow">
+        <div class="lbl"><span class="swatch" style="background:#4285f4"></span>Google (Gemini) API key</div>
+        <input class="field" id="key_google" type="password" placeholder="AIza...">
+      </div>
+      <div class="keyrow">
+        <div class="lbl"><span class="swatch" style="background:#b8b8b8"></span>Ollama base URL</div>
+        <input class="field" id="key_ollama" placeholder="http://localhost:11434">
+      </div>
+      <div class="keyrow">
+        <div class="lbl"><span class="swatch" style="background:var(--amber)"></span>Optional CORS proxy URL <span style="color:var(--ink-faint)">— prepended to cloud calls if set</span></div>
+        <input class="field" id="cfg_proxy" placeholder="https://my-proxy.example/?url=">
+      </div>
+      <div class="keyrow">
+        <div class="lbl"><span class="swatch" style="background:#6b7280"></span>Custom <code style="color:var(--cyan)">openai-compatible</code> key <span style="color:var(--ink-faint)">— shared fallback for custom-endpoint rows; leave blank for keyless local servers</span></div>
+        <input class="field" id="key_openai_compatible" type="password" placeholder="(optional)">
+      </div>
+
+      <label style="margin-top:18px">Active models <span style="color:var(--ink-faint)">— edit the model IDs to match what you have access to</span></label>
+      <div id="modelEditor"></div>
+      <div style="display:flex; gap:8px; margin-top:10px;">
+        <button class="btn-ghost" id="addModelBtn" style="flex:1">+ add a model row</button>
+        <button class="btn-ghost" id="resetModelsBtn" style="flex:1">↺ reset to latest defaults</button>
+      </div>
+    </div>
+    <div class="mfoot">
+      <button class="btn-ghost" data-close="set">Close</button>
+      <button class="btn-amber" id="saveSettings">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+
+/* ============================================================
+   State & persistence
+   ============================================================ */
+const LS = {
+  keys: 'fanout.keys.v1',
+  models: 'fanout.models.v3',
+  proxy: 'fanout.proxy.v1',
+  stream: 'fanout.stream.v1',
+};
+
+// OpenRouter-first defaults: the 4 active rows all run through one OpenRouter
+// key (no per-provider signup, no CORS). Slugs are provider/model — verify exact
+// strings at openrouter.ai/models. To use a direct provider key for any row
+// instead, change its vendor (e.g. to 'anthropic') — saved keys still apply.
+const DEFAULT_MODELS = [
+  { id: 'm1', label: 'Claude Opus 4.8',  vendor: 'openrouter', model: 'anthropic/claude-opus-4-8',          active: true },
+  { id: 'm2', label: 'GPT-5.5',          vendor: 'openrouter', model: 'openai/gpt-5.5',                     active: true },
+  { id: 'm3', label: 'Gemini 3.5 Flash', vendor: 'openrouter', model: 'google/gemini-3.5-flash',            active: true },
+  { id: 'm4', label: 'Grok 4.3',         vendor: 'openrouter', model: 'x-ai/grok-4.3',                      active: true },
+  { id: 'm5', label: 'DeepSeek',         vendor: 'openrouter', model: 'deepseek/deepseek-chat',             active: false },
+  { id: 'm6', label: 'Qwen3-Max',        vendor: 'openrouter', model: 'qwen/qwen3-max',                     active: false },
+  { id: 'm7', label: 'Llama 3.3',        vendor: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct',  active: false },
+  { id: 'm8', label: 'Local (Ollama)',   vendor: 'ollama',     model: 'llama3.3',                           active: false },
+];
+
+let keys = loadJSON(LS.keys, {});
+let proxy = localStorage.getItem(LS.proxy) || '';
+let models = loadJSON(LS.models, DEFAULT_MODELS);
+let streamingOn = localStorage.getItem(LS.stream) === '1';
+
+function loadJSON(k, fb) { try { const v = JSON.parse(localStorage.getItem(k)); return v ?? fb; } catch { return fb; } }
+function saveJSON(k, v) { localStorage.setItem(k, JSON.stringify(v)); }
+
+/* File System Access — directory handle (session-scoped) */
+let dirHandle = null;
+const fsaSupported = 'showDirectoryPicker' in window;
+
+/* last harvest context */
+let pendingClips = []; // array of { text, sourceModel, ts, full }
+let pendingIsAll = false; // true when saving via "keep all columns"
+let lastPrompt = '';   // the prompt most recently sent (for saving alongside responses)
+
+/* ============================================================
+   Vendor adapters — each returns assistant text
+   ============================================================ */
+// Default base URLs for OpenAI-dialect vendors. A model row's own baseUrl
+// (if set) always overrides these — that's what lets any OpenAI-compatible
+// endpoint (OpenRouter, vLLM, LM Studio, LiteLLM…) work as just a settings row.
+const OPENAI_COMPAT_BASE = {
+  openai:     'https://api.openai.com/v1',
+  deepseek:   'https://api.deepseek.com',
+  qwen:       'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+  grok:       'https://api.x.ai/v1',
+  openrouter: 'https://openrouter.ai/api/v1',
+};
+const OPENAI_COMPAT_VENDORS = ['openai', 'deepseek', 'qwen', 'grok', 'openrouter', 'openai-compatible'];
+
+async function callModel(m, prompt, onToken) {
+  const s = !!onToken;
+  if (m.vendor === 'anthropic') return s ? callAnthropicStream(m, prompt, onToken) : callAnthropic(m, prompt);
+  if (m.vendor === 'google')    return s ? callGoogleStream(m, prompt, onToken)    : callGoogle(m, prompt);
+  if (m.vendor === 'ollama')    return s ? callOllamaStream(m, prompt, onToken)    : callOllama(m, prompt);
+  if (OPENAI_COMPAT_VENDORS.includes(m.vendor)) return s ? callOpenAICompatibleStream(m, prompt, onToken) : callOpenAICompatible(m, prompt);
+  throw new Error('Unknown vendor: ' + m.vendor);
+}
+function withProxy(url) { return proxy ? proxy + encodeURIComponent(url) : url; }
+
+// Reads a fetch Response body line-by-line (for SSE / NDJSON streams).
+async function* streamLines(res) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      yield buf.slice(0, i);
+      buf = buf.slice(i + 1);
+    }
+  }
+  if (buf.trim()) yield buf;
+}
+// Resolve base URL + key for any OpenAI-dialect vendor (shared by streaming and not).
+function resolveOpenAICompat(m) {
+  const base = (m.baseUrl && m.baseUrl.trim()) || OPENAI_COMPAT_BASE[m.vendor];
+  if (!base) throw new Error("No base URL — set one on this model row (vendor 'openai-compatible' needs it)");
+  const key = (m.apiKey && m.apiKey.trim()) || keys[m.vendor] || keys['openai-compatible'] || '';
+  return { base, key };
+}
+// Max-reasoning body additions, per vendor. OpenRouter has a unified `reasoning`
+// field it translates per provider (and ignores where unsupported) — so it covers
+// Claude/GPT/Gemini/Grok in one shot. OpenAI & DeepSeek take `reasoning_effort`.
+// Grok/Qwen/custom are left at provider default (they reason fully by default, and
+// forcing a param there risks a 400 — going through OpenRouter is the safe way to
+// max them out).
+function openaiReasoningBody(vendor) {
+  if (vendor === 'openrouter') return { reasoning: { effort: 'high' } };
+  if (vendor === 'openai' || vendor === 'deepseek') return { reasoning_effort: 'high' };
+  return {};
+}
+
+async function callAnthropic(m, prompt) {
+  const key = keys.anthropic;
+  if (!key) throw new Error('No Anthropic key set (⚙ keys & models)');
+  const res = await fetch(withProxy('https://api.anthropic.com/v1/messages'), {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({ model: m.model, max_tokens: 8000, thinking: { type: 'enabled', budget_tokens: 4000 }, messages: [{ role: 'user', content: prompt }] }),
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' — ' + (await safeText(res)));
+  const data = await res.json();
+  return (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+}
+
+async function callOpenAICompatible(m, prompt) {
+  const { base, key } = resolveOpenAICompat(m);
+  const headers = { 'content-type': 'application/json' };
+  if (key) headers['authorization'] = 'Bearer ' + key; // local servers may need no key
+  const url = base.replace(/\/$/, '') + '/chat/completions';
+  const res = await fetch(withProxy(url), {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ model: m.model, messages: [{ role: 'user', content: prompt }], ...openaiReasoningBody(m.vendor) }),
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' — ' + (await safeText(res)));
+  const data = await res.json();
+  return (data.choices?.[0]?.message?.content || '').trim();
+}
+
+async function callGoogle(m, prompt) {
+  const key = keys.google;
+  if (!key) throw new Error('No Google key set (⚙ keys & models)');
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(m.model) + ':generateContent?key=' + key;
+  const res = await fetch(withProxy(url), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { thinkingConfig: { thinkingLevel: 'HIGH' } } }),
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' — ' + (await safeText(res)));
+  const data = await res.json();
+  return (data.candidates?.[0]?.content?.parts || []).map(p => p.text).join('\n').trim();
+}
+
+async function callOllama(m, prompt) {
+  const base = keys.ollama || 'http://localhost:11434';
+  const res = await fetch(base.replace(/\/$/, '') + '/api/generate', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: m.model, prompt: prompt, stream: false }),
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' — is Ollama running? ' + (await safeText(res)));
+  const data = await res.json();
+  return (data.response || '').trim();
+}
+
+async function safeText(res) { try { const t = await res.text(); return t.slice(0, 200); } catch { return ''; } }
+
+/* ---- Streaming variants (call onToken(chunk) as text arrives, return full text) ---- */
+async function callOpenAICompatibleStream(m, prompt, onToken) {
+  const { base, key } = resolveOpenAICompat(m);
+  const headers = { 'content-type': 'application/json' };
+  if (key) headers['authorization'] = 'Bearer ' + key;
+  const url = base.replace(/\/$/, '') + '/chat/completions';
+  const res = await fetch(withProxy(url), {
+    method: 'POST', headers,
+    body: JSON.stringify({ model: m.model, messages: [{ role: 'user', content: prompt }], stream: true, ...openaiReasoningBody(m.vendor) }),
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' — ' + (await safeText(res)));
+  let full = '';
+  for await (const line of streamLines(res)) {
+    const t = line.trim();
+    if (!t.startsWith('data:')) continue;
+    const payload = t.slice(5).trim();
+    if (payload === '[DONE]') break;
+    try {
+      const j = JSON.parse(payload);
+      const delta = j.choices?.[0]?.delta?.content || '';
+      if (delta) { full += delta; onToken(delta); }
+    } catch { /* ignore keep-alive / partial */ }
+  }
+  return full;
+}
+
+async function callAnthropicStream(m, prompt, onToken) {
+  const key = keys.anthropic;
+  if (!key) throw new Error('No Anthropic key set (⚙ keys & models)');
+  const res = await fetch(withProxy('https://api.anthropic.com/v1/messages'), {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({ model: m.model, max_tokens: 8000, thinking: { type: 'enabled', budget_tokens: 4000 }, stream: true, messages: [{ role: 'user', content: prompt }] }),
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' — ' + (await safeText(res)));
+  let full = '';
+  for await (const line of streamLines(res)) {
+    const t = line.trim();
+    if (!t.startsWith('data:')) continue;
+    try {
+      const j = JSON.parse(t.slice(5).trim());
+      if (j.type === 'content_block_delta' && j.delta && j.delta.text) { full += j.delta.text; onToken(j.delta.text); }
+    } catch {}
+  }
+  return full;
+}
+
+async function callGoogleStream(m, prompt, onToken) {
+  const key = keys.google;
+  if (!key) throw new Error('No Google key set (⚙ keys & models)');
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(m.model) + ':streamGenerateContent?alt=sse&key=' + key;
+  const res = await fetch(withProxy(url), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { thinkingConfig: { thinkingLevel: 'HIGH' } } }),
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' — ' + (await safeText(res)));
+  let full = '';
+  for await (const line of streamLines(res)) {
+    const t = line.trim();
+    if (!t.startsWith('data:')) continue;
+    try {
+      const j = JSON.parse(t.slice(5).trim());
+      const txt = (j.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+      if (txt) { full += txt; onToken(txt); }
+    } catch {}
+  }
+  return full;
+}
+
+async function callOllamaStream(m, prompt, onToken) {
+  const base = keys.ollama || 'http://localhost:11434';
+  const res = await fetch(base.replace(/\/$/, '') + '/api/generate', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: m.model, prompt: prompt, stream: true }),
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' — is Ollama running? ' + (await safeText(res)));
+  let full = '';
+  for await (const line of streamLines(res)) {       // Ollama streams NDJSON, not SSE
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const j = JSON.parse(t);
+      if (j.response) { full += j.response; onToken(j.response); }
+    } catch {}
+  }
+  return full;
+}
+
+/* ============================================================
+   Render: model toggles + columns
+   ============================================================ */
+const elToggles = document.getElementById('modelToggles');
+const elBoard = document.getElementById('board');
+
+function activeModels() { return models.filter(m => m.active); }
+
+function renderToggles() {
+  elToggles.innerHTML = '';
+  models.forEach(m => {
+    const b = document.createElement('button');
+    b.className = 'mtoggle' + (m.active ? ' active' : '');
+    b.innerHTML = '<span class="swatch"></span>' + escapeHtml(m.label);
+    b.onclick = () => { m.active = !m.active; saveJSON(LS.models, models); renderToggles(); };
+    elToggles.appendChild(b);
+  });
+}
+
+function renderColumns() {
+  const act = activeModels();
+  if (!act.length) {
+    elBoard.innerHTML = '<div class="empty-board">No models selected. Toggle at least one above.</div>';
+    return;
+  }
+  elBoard.innerHTML = '';
+  act.forEach(m => {
+    const col = document.createElement('div');
+    col.className = 'col';
+    col.dataset.model = m.id;
+    col.innerHTML =
+      '<div class="colhead"><span class="swatch"></span>' +
+      '<span class="name">' + escapeHtml(m.label) + '</span>' +
+      '<span class="vendor">' + escapeHtml(m.model) + '</span>' +
+      '<span class="stat" data-stat>idle</span>' +
+      '<button class="colkeep" data-keepcol="' + m.id + '" title="Keep this whole column → notes">⤓</button>' +
+      '<button class="colrerun" data-rerun="' + m.id + '" title="Re-run just this column">↻</button></div>' +
+      '<div class="colbody empty" data-body>Run a prompt to see output.</div>';
+    elBoard.appendChild(col);
+  });
+  refreshControls();
+}
+
+function setStat(modelId, text, cls) {
+  const col = elBoard.querySelector('.col[data-model="' + modelId + '"]');
+  if (!col) return;
+  const s = col.querySelector('[data-stat]');
+  s.textContent = text; s.className = 'stat ' + (cls || '');
+}
+// delegated: re-run / keep a single column (survives column re-renders)
+elBoard.addEventListener('click', (e) => {
+  const rerun = e.target.closest('[data-rerun]');
+  if (rerun) { runOne(rerun.dataset.rerun); return; }
+  const keep = e.target.closest('[data-keepcol]');
+  if (keep) { keepColumn(keep.dataset.keepcol); return; }
+});
+function setBody(modelId, text, isErr) {
+  const col = elBoard.querySelector('.col[data-model="' + modelId + '"]');
+  if (!col) return;
+  const b = col.querySelector('[data-body]');
+  b.classList.remove('empty');
+  if (isErr) { b.innerHTML = '<span class="err">⚠ ' + escapeHtml(text) + '</span>'; }
+  else { b.textContent = text; b.dataset.modelLabel = (models.find(x => x.id === modelId) || {}).label || modelId; }
+}
+
+// streaming render: clear column, then append chunks live
+const streamBuf = {};
+function startStreamBody(modelId) {
+  const col = elBoard.querySelector('.col[data-model="' + modelId + '"]');
+  if (!col) return;
+  const b = col.querySelector('[data-body]');
+  b.classList.remove('empty');
+  b.textContent = '';
+  b.dataset.modelLabel = (models.find(x => x.id === modelId) || {}).label || modelId;
+  streamBuf[modelId] = '';
+}
+function appendStreamBody(modelId, chunk) {
+  const col = elBoard.querySelector('.col[data-model="' + modelId + '"]');
+  if (!col) return;
+  const b = col.querySelector('[data-body]');
+  streamBuf[modelId] = (streamBuf[modelId] || '') + chunk;
+  b.textContent = streamBuf[modelId];
+  b.scrollTop = b.scrollHeight; // follow the latest text
+}
+
+/* ============================================================
+   Run
+   ============================================================ */
+const runBtn = document.getElementById('runBtn');
+const promptEl = document.getElementById('prompt');
+
+// Which columns are currently loading/streaming. Drives button enable/disable.
+const runningIds = new Set();
+function anyRunning() { return runningIds.size > 0; }
+function columnHasContent(modelId) {
+  const col = elBoard.querySelector('.col[data-model="' + modelId + '"]');
+  if (!col) return false;
+  const b = col.querySelector('[data-body]');
+  return !!(b && !b.classList.contains('empty') && b.dataset.modelLabel && (b.textContent || '').trim());
+}
+// Enable/disable every control based on busy state + whether columns have content.
+function refreshControls() {
+  elBoard.querySelectorAll('.col').forEach(col => {
+    const id = col.dataset.model;
+    const busy = runningIds.has(id);
+    const keepBtn = col.querySelector('[data-keepcol]');
+    const rerunBtn = col.querySelector('[data-rerun]');
+    if (rerunBtn) rerunBtn.disabled = busy;                       // can't re-run a loading column
+    if (keepBtn) keepBtn.disabled = busy || !columnHasContent(id); // can't save until finished w/ content
+  });
+  const any = anyRunning();
+  const rb = document.getElementById('runBtn');
+  if (rb) rb.disabled = any;                                       // can't run-all while anything loads
+  const keepAll = document.getElementById('keepAllBtn');
+  const savable = activeModels().some(m => columnHasContent(m.id));
+  if (keepAll) keepAll.disabled = any || !savable;                 // keep-all only when ALL done + something to save
+}
+
+async function runModel(m, prompt) {
+  runningIds.add(m.id);
+  refreshControls();
+  const t0 = performance.now();
+  try {
+    let text;
+    if (streamingOn) {
+      startStreamBody(m.id);
+      let first = true;
+      text = await callModel(m, prompt, (chunk) => {
+        if (first) { setStat(m.id, 'streaming…', 'running'); first = false; }
+        appendStreamBody(m.id, chunk);
+      });
+      const dt = ((performance.now() - t0) / 1000).toFixed(1);
+      if (!text) setBody(m.id, '(empty response)');
+      setStat(m.id, dt + 's', 'done');
+    } else {
+      text = await callModel(m, prompt);
+      const dt = ((performance.now() - t0) / 1000).toFixed(1);
+      setBody(m.id, text || '(empty response)');
+      setStat(m.id, dt + 's', 'done');
+    }
+  } catch (e) {
+    setBody(m.id, e.message, true);
+    setStat(m.id, 'error', 'err');
+  } finally {
+    runningIds.delete(m.id);
+    refreshControls();
+  }
+}
+
+async function run() {
+  if (anyRunning()) { toast('Still running — let the columns finish first.', true); return; }
+  const prompt = promptEl.value.trim();
+  if (!prompt) { toast('Write a prompt first.', true); return; }
+  const act = activeModels();
+  if (!act.length) { toast('Select at least one model.', true); return; }
+
+  lastPrompt = prompt;
+  renderColumns();
+  act.forEach(m => { setStat(m.id, streamingOn ? 'streaming…' : 'running…', 'running'); });
+  await Promise.all(act.map(m => runModel(m, prompt)));
+}
+
+// Re-run a single column without touching the others.
+async function runOne(modelId) {
+  if (runningIds.has(modelId)) { toast('That column is still running.', true); return; }
+  const prompt = promptEl.value.trim();
+  if (!prompt) { toast('Write a prompt first.', true); return; }
+  const m = models.find(x => x.id === modelId);
+  if (!m) return;
+  lastPrompt = prompt;
+  setStat(m.id, streamingOn ? 'streaming…' : 'running…', 'running');
+  await runModel(m, prompt);
+}
+runBtn.onclick = run;
+promptEl.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); run(); }
+});
+
+/* ============================================================
+   Harvest: selection → popover → modal
+   ============================================================ */
+const harvest = document.getElementById('harvest');
+let currentSelectionText = '';
+let currentSelectionModel = '';
+
+document.addEventListener('mouseup', e => {
+  if (harvest.contains(e.target)) return;
+  const sel = window.getSelection();
+  const text = sel.toString().trim();
+  const colbody = e.target.closest ? e.target.closest('.colbody') : null;
+  if (text && colbody && !colbody.classList.contains('empty')) {
+    currentSelectionText = text;
+    currentSelectionModel = colbody.dataset.modelLabel || 'unknown model';
+    const r = sel.getRangeAt(0).getBoundingClientRect();
+    harvest.style.display = 'block';
+    const hw = harvest.offsetWidth, hh = harvest.offsetHeight;
+    let left = r.left + r.width / 2 - hw / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - hw - 8));
+    let top = r.top - hh - 8;
+    if (top < 8) top = r.bottom + 8;
+    harvest.style.left = left + 'px';
+    harvest.style.top = top + 'px';
+  } else {
+    harvest.style.display = 'none';
+  }
+});
+document.addEventListener('mousedown', e => {
+  if (!harvest.contains(e.target)) harvest.style.display = 'none';
+});
+
+document.getElementById('harvestCopy').onclick = async () => {
+  await navigator.clipboard.writeText(currentSelectionText);
+  harvest.style.display = 'none';
+  toast('Copied to clipboard.');
+};
+document.getElementById('harvestKeep').onclick = () => {
+  pendingClips = [{ text: currentSelectionText, sourceModel: currentSelectionModel, ts: new Date(), full: false }];
+  pendingIsAll = false;
+  harvest.style.display = 'none';
+  openClipModal();
+};
+
+/* ============================================================
+   Clip modal
+   ============================================================ */
+const clipScrim = document.getElementById('clipScrim');
+const clipPreview = document.getElementById('clipPreview');
+const clipSource = document.getElementById('clipSource');
+const clipTags = document.getElementById('clipTags');
+const tagChips = document.getElementById('tagChips');
+const existingSelect = document.getElementById('existingSelect');
+const newFileName = document.getElementById('newFileName');
+const destNote = document.getElementById('destNote');
+let destMode = 'existing';
+
+function openClipModal() {
+  const n = pendingClips.length;
+  if (n === 1) {
+    const c = pendingClips[0];
+    document.getElementById('clipTitle').textContent = c.full ? 'Keep this column' : 'Keep this';
+    clipPreview.textContent = c.text;
+    clipSource.textContent = c.sourceModel + '  ·  ' + c.ts.toLocaleString();
+  } else {
+    document.getElementById('clipTitle').textContent = 'Keep all ' + n + ' columns';
+    clipPreview.textContent = pendingClips
+      .map(c => '[' + c.sourceModel + '] ' + c.text.slice(0, 100).replace(/\s+/g, ' ').trim() + (c.text.length > 100 ? '…' : ''))
+      .join('\n\n');
+    clipSource.textContent = n + ' columns · prompt included · each saved with its own attribution';
+  }
+  clipTags.value = '';
+  renderTagChips();
+  // default destination based on whether a folder is connected
+  if (!dirHandle) { destMode = 'clipboard'; }
+  else { destMode = 'existing'; }
+  syncDestSeg();
+  refreshFileList();
+  clipScrim.classList.add('show');
+}
+clipTags.addEventListener('input', renderTagChips);
+function renderTagChips() {
+  const tags = parseTags(clipTags.value);
+  tagChips.innerHTML = tags.map(t => '<span class="tagchip">#' + escapeHtml(t) + '</span>').join('');
+}
+function parseTags(s) {
+  return s.split(/[\s,]+/).map(t => t.trim().replace(/^#/, '')).filter(Boolean);
+}
+
+document.getElementById('destSeg').addEventListener('click', e => {
+  const b = e.target.closest('button[data-dest]'); if (!b) return;
+  destMode = b.dataset.dest; syncDestSeg();
+});
+function syncDestSeg() {
+  document.querySelectorAll('#destSeg button').forEach(b => b.classList.toggle('sel', b.dataset.dest === destMode));
+  document.getElementById('destExisting').style.display = destMode === 'existing' ? 'block' : 'none';
+  document.getElementById('destNew').style.display = destMode === 'new' ? 'block' : 'none';
+  if ((destMode === 'existing' || destMode === 'new') && !dirHandle) {
+    destNote.textContent = 'Connect a notes folder first (top bar), or use Clipboard.';
+  } else if (destMode === 'clipboard') {
+    destNote.textContent = 'Formatted markdown copied — paste into any note.';
+  } else {
+    destNote.textContent = '';
+  }
+}
+
+async function refreshFileList() {
+  if (!dirHandle) { existingSelect.innerHTML = '<option>— no folder connected —</option>'; return; }
+  const files = [];
+  for await (const [name, h] of dirHandle.entries()) {
+    if (h.kind === 'file' && name.toLowerCase().endsWith('.md')) files.push(name);
+  }
+  files.sort();
+  existingSelect.innerHTML = files.length
+    ? files.map(f => '<option>' + escapeHtml(f) + '</option>').join('')
+    : '<option value="">— no .md files yet, use New file —</option>';
+}
+
+document.getElementById('clipConfirm').onclick = async () => {
+  const tags = parseTags(clipTags.value);
+  const promptText = (lastPrompt || promptEl.value.trim()).trim();
+  const responses = pendingClips.map(c => formatClip(c, tags)).join('');
+  const many = pendingClips.length > 1;
+  try {
+    if (destMode === 'clipboard') {
+      // not a file → include the prompt (keep-all and keep-one both)
+      const block = (promptText ? formatPrompt(promptText, tags) : '') + responses;
+      await navigator.clipboard.writeText(block);
+      toast(many ? 'All columns copied to clipboard.' : 'Copied to clipboard.');
+    } else if (destMode === 'existing') {
+      if (!dirHandle) return toast('Connect a folder first.', true);
+      const fname = existingSelect.value;
+      if (!fname) return toast('Pick a file or use New file.', true);
+      const existing = await readFileText(fname);
+      // keep-all: always include the prompt. keep-one: include unless the file already has it.
+      const includePrompt = !!promptText && (pendingIsAll || !existing.includes(promptText));
+      const block = (includePrompt ? formatPrompt(promptText, tags) : '') + responses;
+      await appendToFile(fname, block);
+      toast((many ? pendingClips.length + ' columns appended to ' : 'Appended to ') + fname + (includePrompt ? '' : ' (prompt already there)'));
+    } else if (destMode === 'new') {
+      if (!dirHandle) return toast('Connect a folder first.', true);
+      let fname = (newFileName.value.trim() || 'notes.md');
+      if (!fname.toLowerCase().endsWith('.md')) fname += '.md';
+      const block = (promptText ? formatPrompt(promptText, tags) : '') + responses; // new file → include prompt
+      await createFile(fname, block);
+      toast('Created ' + fname);
+      await refreshFileList();
+    }
+    clipScrim.classList.remove('show');
+  } catch (e) {
+    toast('Write failed: ' + e.message, true);
+  }
+};
+
+// Prompt block: heading + the prompt verbatim (verbatim so dedup can string-match it).
+function formatPrompt(prompt, tags) {
+  const tagline = tags.length ? tags.map(t => '#' + t).join(' ') : '';
+  let out = '\n# Prompt\n\n' + prompt.trim() + '\n';
+  if (tagline) out += '\n' + tagline + '\n';
+  return out;
+}
+
+function formatClip(clip, tags) {
+  const stamp = clip.ts.toISOString();
+  const tagline = tags.length ? tags.map(t => '#' + t).join(' ') : '';
+  if (clip.full) {
+    // whole-column save: heading + the response verbatim (no blockquote)
+    let out = '\n## ' + clip.sourceModel + '\n';
+    out += '*' + stamp + (tagline ? '  ·  ' + tagline : '') + '*\n\n';
+    out += clip.text.trim() + '\n';
+    return out;
+  }
+  // selection save: greppable blockquote with attribution
+  let out = '\n---\n';
+  out += '> ' + clip.text.replace(/\n/g, '\n> ') + '\n\n';
+  out += '— ' + clip.sourceModel;
+  if (tagline) out += '  ·  ' + tagline;
+  out += '  ·  ' + stamp + '\n';
+  return out;
+}
+
+// Read the full rendered text of a column; null if empty or errored.
+function columnContent(modelId) {
+  const col = elBoard.querySelector('.col[data-model="' + modelId + '"]');
+  if (!col) return null;
+  const b = col.querySelector('[data-body]');
+  if (!b || b.classList.contains('empty')) return null;
+  const label = b.dataset.modelLabel;          // unset on error columns
+  const text = (b.textContent || '').trim();
+  if (!label || !text) return null;
+  return { text, sourceModel: label, ts: new Date(), full: true };
+}
+function keepColumn(modelId) {
+  if (runningIds.has(modelId)) { toast('Let the column finish before saving.', true); return; }
+  const c = columnContent(modelId);
+  if (!c) { toast('Nothing to keep in that column yet.', true); return; }
+  pendingClips = [c];
+  pendingIsAll = false;
+  openClipModal();
+}
+function keepAllColumns() {
+  if (anyRunning()) { toast('Wait for all columns to finish before saving all.', true); return; }
+  const clips = activeModels().map(m => columnContent(m.id)).filter(Boolean);
+  if (!clips.length) { toast('Nothing to save yet — run a prompt first.', true); return; }
+  pendingClips = clips;
+  pendingIsAll = true;
+  openClipModal();
+}
+
+/* ============================================================
+   File System Access helpers
+   ============================================================ */
+document.getElementById('vaultBtn').onclick = async () => {
+  if (!fsaSupported) {
+    toast('This browser lacks the File System Access API. Use a Chromium browser, or use Clipboard / New file download.', true);
+    return;
+  }
+  try {
+    dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    document.getElementById('vaultDot').className = 'dot on';
+    document.getElementById('vaultBtn').innerHTML = '<span class="dot on"></span>' + dirHandle.name;
+    toast('Connected: ' + dirHandle.name);
+  } catch (e) { /* user cancelled */ }
+};
+
+async function appendToFile(name, text) {
+  const fh = await dirHandle.getFileHandle(name, { create: true });
+  const file = await fh.getFile();
+  const existing = await file.text();
+  const w = await fh.createWritable();
+  await w.write(existing + text);
+  await w.close();
+}
+async function readFileText(name) {
+  try {
+    const fh = await dirHandle.getFileHandle(name, { create: false });
+    const file = await fh.getFile();
+    return await file.text();
+  } catch { return ''; }
+}
+async function createFile(name, text) {
+  // if it exists, getFileHandle won't error; we prepend a small header for a fresh file
+  const fh = await dirHandle.getFileHandle(name, { create: true });
+  const file = await fh.getFile();
+  const existing = await file.text();
+  const header = existing ? '' : ('# ' + name.replace(/\.md$/i, '') + '\n');
+  const w = await fh.createWritable();
+  await w.write(existing + header + text);
+  await w.close();
+}
+
+/* ============================================================
+   Settings modal
+   ============================================================ */
+const setScrim = document.getElementById('setScrim');
+const modelEditor = document.getElementById('modelEditor');
+
+document.getElementById('settingsBtn').onclick = () => {
+  document.getElementById('key_openrouter').value = keys.openrouter || '';
+  document.getElementById('key_anthropic').value = keys.anthropic || '';
+  document.getElementById('key_openai').value = keys.openai || '';
+  document.getElementById('key_deepseek').value = keys.deepseek || '';
+  document.getElementById('key_qwen').value = keys.qwen || '';
+  document.getElementById('key_grok').value = keys.grok || '';
+  document.getElementById('key_google').value = keys.google || '';
+  document.getElementById('key_ollama').value = keys.ollama || '';
+  document.getElementById('key_openai_compatible').value = keys['openai-compatible'] || '';
+  document.getElementById('cfg_proxy').value = proxy || '';
+  renderModelEditor();
+  setScrim.classList.add('show');
+};
+
+const ALL_VENDORS = ['anthropic','openai','deepseek','qwen','grok','openrouter','google','ollama','openai-compatible'];
+
+function renderModelEditor() {
+  modelEditor.innerHTML = '';
+  models.forEach((m, i) => {
+    const row = document.createElement('div');
+    row.style.cssText = 'border:1px solid var(--line); border-radius:var(--radius); padding:8px; margin-top:8px; background:var(--ground);';
+    const basePlaceholder = OPENAI_COMPAT_BASE[m.vendor]
+      ? 'default: ' + OPENAI_COMPAT_BASE[m.vendor]
+      : (m.vendor === 'openai-compatible' ? 'required — e.g. https://openrouter.ai/api/v1' : 'n/a for this vendor');
+    row.innerHTML =
+      '<div style="display:flex; gap:6px; align-items:center;">' +
+        '<input class="field" style="flex:1.1" value="' + escapeAttr(m.label) + '" data-f="label" placeholder="display name">' +
+        '<select class="selectf" style="flex:0.9" data-f="vendor">' +
+          ALL_VENDORS.map(v => '<option' + (v===m.vendor?' selected':'') + '>' + v + '</option>').join('') +
+        '</select>' +
+        '<input class="field" style="flex:1.2" value="' + escapeAttr(m.model) + '" data-f="model" placeholder="model id">' +
+        '<button class="btn-ghost" data-del="' + i + '" style="padding:8px 11px">✕</button>' +
+      '</div>' +
+      '<div style="display:flex; gap:6px; align-items:center; margin-top:6px;">' +
+        '<input class="field" style="flex:1; font-size:11px;" value="' + escapeAttr(m.baseUrl || '') + '" data-f="baseUrl" placeholder="base URL — ' + escapeAttr(basePlaceholder) + '">' +
+      '</div>';
+    row.dataset.idx = i;
+    modelEditor.appendChild(row);
+  });
+  modelEditor.querySelectorAll('button[data-del]').forEach(b => {
+    b.onclick = () => { models.splice(+b.dataset.del, 1); renderModelEditor(); };
+  });
+  // re-render when vendor changes so the base-URL placeholder updates
+  modelEditor.querySelectorAll('select[data-f="vendor"]').forEach(sel => {
+    sel.onchange = () => {
+      const rows = [...modelEditor.children];
+      models = rows.map((r, idx) => readRow(r, idx));
+      renderModelEditor();
+    };
+  });
+}
+function readRow(r, fallbackIdx) {
+  const idx = r.dataset.idx != null ? +r.dataset.idx : fallbackIdx;
+  const prev = models[idx] || {};
+  return {
+    id: prev.id || ('m' + Math.random().toString(36).slice(2)),
+    label: r.querySelector('[data-f="label"]').value.trim() || 'model',
+    vendor: r.querySelector('[data-f="vendor"]').value,
+    model: r.querySelector('[data-f="model"]').value.trim(),
+    baseUrl: r.querySelector('[data-f="baseUrl"]').value.trim(),
+    apiKey: prev.apiKey || '',
+    active: prev.active !== false,
+  };
+}
+document.getElementById('addModelBtn').onclick = () => {
+  // capture current edits first so the new row doesn't wipe them
+  const rows = [...modelEditor.children];
+  models = rows.map((r, idx) => readRow(r, idx));
+  models.push({ id: 'm' + Date.now(), label: 'New model', vendor: 'openai-compatible', model: '', baseUrl: '', apiKey: '', active: true });
+  renderModelEditor();
+};
+document.getElementById('resetModelsBtn').onclick = () => {
+  models = JSON.parse(JSON.stringify(DEFAULT_MODELS));
+  renderModelEditor();
+  toast('Models reset to latest defaults — Save to keep.');
+};
+
+document.getElementById('saveSettings').onclick = () => {
+  keys = {
+    openrouter: document.getElementById('key_openrouter').value.trim(),
+    anthropic: document.getElementById('key_anthropic').value.trim(),
+    openai: document.getElementById('key_openai').value.trim(),
+    deepseek: document.getElementById('key_deepseek').value.trim(),
+    qwen: document.getElementById('key_qwen').value.trim(),
+    grok: document.getElementById('key_grok').value.trim(),
+    google: document.getElementById('key_google').value.trim(),
+    ollama: document.getElementById('key_ollama').value.trim(),
+    'openai-compatible': document.getElementById('key_openai_compatible').value.trim(),
+  };
+  proxy = document.getElementById('cfg_proxy').value.trim();
+  // pull model rows
+  const rows = [...modelEditor.children];
+  models = rows.map((r, idx) => readRow(r, idx));
+  saveJSON(LS.keys, keys);
+  saveJSON(LS.models, models);
+  localStorage.setItem(LS.proxy, proxy);
+  renderToggles(); renderColumns();
+  setScrim.classList.remove('show');
+  toast('Saved.');
+};
+
+/* close handlers */
+document.querySelectorAll('[data-close]').forEach(el => {
+  el.onclick = () => {
+    const which = el.dataset.close;
+    if (which === 'set') setScrim.classList.remove('show');
+    if (which === 'clip') clipScrim.classList.remove('show');
+  };
+});
+[setScrim, clipScrim].forEach(s => s.addEventListener('mousedown', e => { if (e.target === s) s.classList.remove('show'); }));
+
+/* ============================================================
+   Toast + utils
+   ============================================================ */
+let toastTimer;
+function toast(msg, err) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = err ? 'err' : '';
+  requestAnimationFrame(() => t.classList.add('show'));
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
+}
+function escapeHtml(s) { return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function escapeAttr(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+/* ============================================================
+   Boot
+   ============================================================ */
+function syncStreamBtn() {
+  const dot = document.getElementById('streamDot');
+  const btn = document.getElementById('streamBtn');
+  dot.className = 'dot ' + (streamingOn ? 'on' : 'off');
+  btn.title = streamingOn ? 'Streaming on — columns fill live as each model writes' : 'Streaming off — each column appears once its model finishes';
+}
+document.getElementById('streamBtn').onclick = () => {
+  streamingOn = !streamingOn;
+  localStorage.setItem(LS.stream, streamingOn ? '1' : '0');
+  syncStreamBtn();
+  toast(streamingOn ? 'Streaming on — columns fill live.' : 'Streaming off.');
+};
+document.getElementById('keepAllBtn').onclick = keepAllColumns;
+syncStreamBtn();
+
+renderToggles();
+renderColumns();
+if (!fsaSupported) {
+  document.getElementById('vaultBtn').title = 'File System Access API not available in this browser';
+}
+</script>
+</body>
+</html>
